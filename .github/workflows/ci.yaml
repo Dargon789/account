@@ -34,11 +34,13 @@ jobs:
           UPGRADE_TEST_OLD_VERSION: ${{ secrets.UPGRADE_TEST_OLD_VERSION }}
         run: |
           forge test -vvv
-          forge test --rerun
+          Tip: Run `forge test --rerun` to retry only the 1 failed test
+
       - name: Format contracts and generate snapshots
         if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
         run: |
           forge fmt
+          forge lint
           forge snapshot --isolate --match-contract Benchmark --via-ir
 
       - name: Commit formatting and snapshot changes
