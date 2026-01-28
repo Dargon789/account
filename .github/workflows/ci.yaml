@@ -33,9 +33,10 @@ jobs:
           UPGRADE_TEST_OLD_PROXY: ${{ secrets.UPGRADE_TEST_OLD_PROXY }}
           UPGRADE_TEST_OLD_VERSION: ${{ secrets.UPGRADE_TEST_OLD_VERSION }}
         run: |
-          forge test -vvv
-          Tip: Run `forge test --rerun` to retry only the 1 failed test
-
+          forge test 
+          #to retry only the 1 failed test
+          forge test --rerun
+          
       - name: Format contracts and generate snapshots
         if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
         run: |
