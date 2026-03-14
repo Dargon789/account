@@ -6,8 +6,6 @@ import "./Base.t.sol";
 import {MockSampleDelegateCallTarget} from "./utils/mocks/MockSampleDelegateCallTarget.sol";
 import {LibEIP7702} from "solady/accounts/LibEIP7702.sol";
 
-import {Merkle} from "murky/Merkle.sol";
-
 contract AccountTest is BaseTest {
     struct _TestExecuteWithSignatureTemps {
         TargetFunctionPayload[] targetFunctionPayloads;
@@ -70,68 +68,123 @@ contract AccountTest is BaseTest {
         }
     }
 
-    function testMerkleSignature(uint256 seed) public {
+    struct _TestExecuteWithCallSansToTemps {
+        TargetFunctionPayload[] targetFunctionPayloads;
+        ERC7821.CallSansTo[] calls;
+        address to;
+        uint256 n;
+        uint256 nonce;
+        bytes opData;
+        bytes executionData;
+    }
+
+    function testExecuteWithCallSansTo(bytes32) public {
         DelegatedEOA memory d = _randomEIP7702DelegatedEOA();
-        PassKey memory k = _randomSecp256k1PassKey();
-        k.k.isSuperAdmin = true;
+        vm.deal(d.eoa, 100 ether);
 
-        vm.prank(d.eoa);
-        d.d.authorize(k.k);
+        _TestExecuteWithCallSansToTemps memory t;
+        t.n = _bound(_randomUniform(), 1, 5);
+        t.targetFunctionPayloads = new TargetFunctionPayload[](t.n);
+        t.calls = new ERC7821.CallSansTo[](t.n);
+        t.to = address(this);
 
-        // Fuzz number of leaves (2 to 256)
-        uint256 numLeaves = bound(seed, 2, 256);
-        bytes32[] memory leaves = new bytes32[](numLeaves);
-
-        // Generate random leaves
-        for (uint256 i = 0; i < numLeaves; i++) {
-            leaves[i] = keccak256(abi.encodePacked("leaf", i, seed));
+        for (uint256 i; i < t.n; ++i) {
+            uint256 value = _random() % 0.1 ether;
+            bytes memory data = _truncateBytes(_randomBytes(), 0xff);
+            t.calls[i] =
+                ERC7821.CallSansTo(value, abi.encodeWithSignature("targetFunction(bytes)", data));
+            t.targetFunctionPayloads[i].value = value;
+            t.targetFunctionPayloads[i].data = data;
         }
 
-        // Pick a random valid index
-        uint256 validIndex = seed % numLeaves;
-        bytes32 validDigest = leaves[validIndex];
+        t.nonce = d.d.getNonce(0);
+        bytes memory signature = _sig(d, d.d.computeDigest(t.calls, t.to, t.nonce));
+        t.opData = abi.encodePacked(t.nonce, signature);
+        t.executionData = abi.encode(t.to, t.calls, t.opData);
 
-        Merkle merkle = new Merkle();
-        bytes32 root = merkle.getRoot(leaves);
-        bytes32[] memory proof = merkle.getProof(leaves, validIndex);
-
-        // Test valid merkle proof
-        {
-            bytes memory rootSig = abi.encode(proof, root, _sig(k, root));
-            bytes memory sig = abi.encodePacked(rootSig, bytes32(0), uint8(0), uint8(1));
-
-            (bool isValid, bytes32 keyHash) = d.d.unwrapAndValidateSignature(validDigest, sig);
-            assertEq(isValid, true);
-            assertEq(keyHash, k.keyHash);
-
-            // Test invalid digest not in tree
-            bytes32 invalidDigest = keccak256(abi.encodePacked("not_in_tree", seed));
-            (isValid, keyHash) = d.d.unwrapAndValidateSignature(invalidDigest, sig);
-            assertEq(isValid, false);
-            assertEq(keyHash, bytes32(0));
+        // Negative test: wrong signature (32/256 chance)
+        if (_randomChance(32)) {
+            bytes memory wrongSignature =
+                _sig(_randomEIP7702DelegatedEOA(), d.d.computeDigest(t.calls, t.to, t.nonce));
+            t.opData = abi.encodePacked(t.nonce, wrongSignature);
+            t.executionData = abi.encode(t.to, t.calls, t.opData);
+            vm.expectRevert(bytes4(keccak256("Unauthorized()")));
+            d.d.execute(_ERC7821_BATCH_SANS_TO_EXECUTION_MODE, t.executionData);
+            return;
         }
 
-        // Test tampered proof (only if proof has elements to tamper)
-        if (proof.length > 0) {
-            bytes32[] memory tamperedProof = new bytes32[](proof.length);
-            for (uint256 i = 0; i < proof.length; i++) {
-                tamperedProof[i] = i == 0 ? bytes32(uint256(proof[i]) ^ 1) : proof[i];
-            }
-            bytes memory tamperedRootSig = abi.encode(tamperedProof, root, _sig(k, root));
-            bytes memory tamperedSig =
-                abi.encodePacked(tamperedRootSig, bytes32(0), uint8(0), uint8(1));
-            (bool isValid,) = d.d.unwrapAndValidateSignature(validDigest, tamperedSig);
-            assertEq(isValid, false);
-        }
+        d.d.execute(_ERC7821_BATCH_SANS_TO_EXECUTION_MODE, t.executionData);
 
-        // Test wrong root (tampered root should fail verification)
-        {
-            bytes32 wrongRoot = bytes32(uint256(root) ^ 1);
-            bytes memory wrongRootSig = abi.encode(proof, wrongRoot, _sig(k, wrongRoot));
-            bytes memory wrongSig = abi.encodePacked(wrongRootSig, bytes32(0), uint8(0), uint8(1));
-            (bool isValid,) = d.d.unwrapAndValidateSignature(validDigest, wrongSig);
-            assertEq(isValid, false);
+        assertEq(targetFunctionPayloads.length, t.n);
+        for (uint256 i; i < t.n; ++i) {
+            assertEq(targetFunctionPayloads[i].by, d.eoa);
+            assertEq(targetFunctionPayloads[i].value, t.targetFunctionPayloads[i].value);
+            assertEq(targetFunctionPayloads[i].data, t.targetFunctionPayloads[i].data);
         }
+    }
+
+    function testExecuteWithCallSansToWrongNonce() public {
+        DelegatedEOA memory d = _randomEIP7702DelegatedEOA();
+        vm.deal(d.eoa, 100 ether);
+
+        _TestExecuteWithCallSansToTemps memory t;
+        t.n = 1;
+        t.targetFunctionPayloads = new TargetFunctionPayload[](t.n);
+        t.calls = new ERC7821.CallSansTo[](t.n);
+        t.to = address(this);
+
+        t.calls[0] = ERC7821.CallSansTo(0, abi.encodeWithSignature("targetFunction(bytes)", "test"));
+
+        t.nonce = d.d.getNonce(0);
+        uint256 wrongNonce = t.nonce + 1;
+        bytes memory signature = _sig(d, d.d.computeDigest(t.calls, t.to, wrongNonce));
+        t.opData = abi.encodePacked(wrongNonce, signature);
+        t.executionData = abi.encode(t.to, t.calls, t.opData);
+
+        vm.expectRevert(); // Should revert due to invalid nonce
+        d.d.execute(_ERC7821_BATCH_SANS_TO_EXECUTION_MODE, t.executionData);
+    }
+
+    function testExecuteWithCallSansToWrongDigest() public {
+        DelegatedEOA memory d = _randomEIP7702DelegatedEOA();
+        vm.deal(d.eoa, 100 ether);
+
+        _TestExecuteWithCallSansToTemps memory t;
+        t.n = 1;
+        t.targetFunctionPayloads = new TargetFunctionPayload[](t.n);
+        t.calls = new ERC7821.CallSansTo[](t.n);
+        t.to = address(this);
+
+        t.calls[0] = ERC7821.CallSansTo(0, abi.encodeWithSignature("targetFunction(bytes)", "test"));
+
+        t.nonce = d.d.getNonce(0);
+        // Sign with wrong to address
+        address wrongTo = address(0x123);
+        bytes memory signature = _sig(d, d.d.computeDigest(t.calls, wrongTo, t.nonce));
+        t.opData = abi.encodePacked(t.nonce, signature);
+        t.executionData = abi.encode(t.to, t.calls, t.opData);
+
+        vm.expectRevert(bytes4(keccak256("Unauthorized()")));
+        d.d.execute(_ERC7821_BATCH_SANS_TO_EXECUTION_MODE, t.executionData);
+    }
+
+    function testExecuteWithCallSansToInvalidOpData() public {
+        DelegatedEOA memory d = _randomEIP7702DelegatedEOA();
+        vm.deal(d.eoa, 100 ether);
+
+        _TestExecuteWithCallSansToTemps memory t;
+        t.n = 1;
+        t.calls = new ERC7821.CallSansTo[](t.n);
+        t.to = address(this);
+
+        t.calls[0] = ERC7821.CallSansTo(0, abi.encodeWithSignature("targetFunction(bytes)", "test"));
+
+        // Test with opData too short (less than 32 bytes for nonce)
+        t.opData = hex"1234"; // Only 2 bytes
+        t.executionData = abi.encode(t.to, t.calls, t.opData);
+
+        vm.expectRevert(bytes4(keccak256("OpDataError()")));
+        d.d.execute(_ERC7821_BATCH_SANS_TO_EXECUTION_MODE, t.executionData);
     }
 
     function testSignatureCheckerApproval(bytes32) public {
@@ -159,10 +212,12 @@ contract AccountTest is BaseTest {
 
         bytes32 replaySafeDigest = keccak256(abi.encode(d.d.SIGN_TYPEHASH(), digest));
 
+        (, string memory name, string memory version,, address verifyingContract,,) =
+            d.d.eip712Domain();
         bytes32 domain = keccak256(
             abi.encode(
                 0x035aff83d86937d35b32e04f0ddc6ff469290eef2f1b692d8a815c89404d4749, // DOMAIN_TYPEHASH with only verifyingContract
-                d.eoa
+                verifyingContract
             )
         );
         replaySafeDigest = keccak256(abi.encodePacked("\x19\x01", domain, replaySafeDigest));
@@ -324,6 +379,29 @@ contract AccountTest is BaseTest {
         assert(keys[1].expiry == 5);
     }
 
+    function testAddDisallowedSuperAdminKeyTypeReverts() public {
+        address orchestrator = address(new Orchestrator());
+        address accountImplementation = address(new IthacaAccount(address(orchestrator)));
+        address accountProxy = address(LibEIP7702.deployProxy(accountImplementation, address(0)));
+        account = MockAccount(payable(accountProxy));
+
+        DelegatedEOA memory d = _randomEIP7702DelegatedEOA();
+
+        PassKey memory k = _randomSecp256k1PassKey();
+        k.k.isSuperAdmin = true;
+
+        vm.startPrank(d.eoa);
+
+        d.d.authorize(k.k);
+
+        k = _randomSecp256r1PassKey();
+        k.k.isSuperAdmin = true;
+        vm.expectRevert(bytes4(keccak256("KeyTypeCannotBeSuperAdmin()")));
+        d.d.authorize(k.k);
+
+        vm.stopPrank();
+    }
+
     function testCrossChainKeyPreCallsAuthorization() public {
         // Setup Keys
         PassKey memory adminKey = _randomSecp256k1PassKey();
@@ -367,7 +445,7 @@ contract AccountTest is BaseTest {
         }
 
         // Prepare main Intent structure (will be reused with same pre-calls)
-        Intent memory baseIntent;
+        Orchestrator.Intent memory baseIntent;
         baseIntent.eoa = eoaAddress;
         baseIntent.paymentToken = address(paymentToken);
         baseIntent.paymentAmount = _bound(_random(), 0, 2 ** 32 - 1);
@@ -391,11 +469,12 @@ contract AccountTest is BaseTest {
         vm.etch(eoaAddress, abi.encodePacked(hex"ef0100", impl));
 
         // Use the prepared pre-calls on chain 1
-        baseIntent.nonce = (0xc1d0 << 240) | 0; // Multichain nonce for main intent
-        baseIntent.signature = _sig(adminKey, computeDigest(baseIntent));
+        Orchestrator.Intent memory u1 = baseIntent;
+        u1.nonce = (0xc1d0 << 240) | 0; // Multichain nonce for main intent
+        u1.signature = _sig(adminKey, u1);
 
         // Execute on chain 1 - should succeed
-        assertEq(oc.execute(encodeIntent(baseIntent)), 0, "Execution should succeed on chain 1");
+        assertEq(oc.execute(abi.encode(u1)), 0, "Execution should succeed on chain 1");
 
         // Verify keys were added on chain 1
         uint256 keysCount1 = IthacaAccount(eoaAddress).keyCount();
@@ -411,10 +490,43 @@ contract AccountTest is BaseTest {
         vm.etch(eoaAddress, abi.encodePacked(hex"ef0100", impl));
 
         // Execution should succeed due to multichain nonce in pre-calls
-        assertEq(oc.execute(encodeIntent(baseIntent)), 0, "Should succeed due to multichain nonce");
+        assertEq(oc.execute(abi.encode(baseIntent)), 0, "Should succeed due to multichain nonce");
 
         // Verify keys were added on chain 137
         uint256 keysCount137 = IthacaAccount(eoaAddress).keyCount();
         assertEq(keysCount137, 2, "Keys should be added on chain 137");
+    }
+
+    function testCommonToZeroAddressReplacement() public {
+        DelegatedEOA memory d = _randomEIP7702DelegatedEOA();
+        vm.deal(d.eoa, 100 ether);
+
+        // Test that address(0) gets replaced with address(this) by comparing digest computation
+        // First, create calls with explicit address(this)
+        ERC7821.CallSansTo[] memory calls = new ERC7821.CallSansTo[](1);
+        calls[0] = ERC7821.CallSansTo(1 ether, "");
+
+        uint256 nonce = d.d.getNonce(0);
+
+        // Compute digest with explicit address(this)
+        bytes32 digestExplicit = d.d.computeDigest(calls, address(d.d), nonce);
+
+        // Compute digest with address(0) - should be the same due to replacement
+        bytes32 digestZero = d.d.computeDigest(calls, address(0), nonce);
+
+        // If address(0) replacement is working, these digests should be identical
+        assertEq(
+            digestExplicit,
+            digestZero,
+            "Digest with address(0) should equal digest with address(this)"
+        );
+
+        // Additionally, test that the execution works
+        bytes memory signature = _sig(d, digestZero);
+        bytes memory opData = abi.encodePacked(nonce, signature);
+        bytes memory executionData = abi.encode(address(0), calls, opData);
+
+        // This should succeed without reverting (proving the replacement works in execution too)
+        d.d.execute(_ERC7821_BATCH_SANS_TO_EXECUTION_MODE, executionData);
     }
 }
