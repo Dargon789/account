@@ -90,6 +90,8 @@ contract IthacaAccount is IIthacaAccount, EIP712, GuardedExecutor {
         mapping(bytes32 => LibBytes.BytesStorage) keyStorage;
         /// @dev Mapping of key hash to the key's extra storage.
         mapping(bytes32 => LibStorage.Bump) keyExtraStorage;
+        /// @dev Nonce management when porto account acts as paymaster.
+        mapping(bytes32 => bool) paymasterNonces;
     }
 
     /// @dev Returns the storage pointer.
@@ -133,6 +135,9 @@ contract IthacaAccount is IIthacaAccount, EIP712, GuardedExecutor {
     /// If you want to upgrade to a bricked implementation,
     /// use `address(0xdeaDDeADDEaDdeaDdEAddEADDEAdDeadDEADDEaD)`.
     error NewImplementationIsZero();
+
+    /// @dev The paymaster nonce has already been used.
+    error PaymasterNonceError();
 
     ////////////////////////////////////////////////////////////////////////
     // Events
@@ -260,13 +265,6 @@ contract IthacaAccount is IIthacaAccount, EIP712, GuardedExecutor {
         virtual
         returns (bytes4)
     {
-        // If the signature's length is 64 or 65, treat it like an secp256k1 signature.
-        if (LibBit.or(signature.length == 64, signature.length == 65)) {
-            return bytes4(
-                ECDSA.recoverCalldata(digest, signature) == address(this) ? 0x1626ba7e : 0xffffffff
-            );
-        }
-
         // To sign an app digest (e.g. Permit2), you would need to perform a `hashTypedData` on the app's 712,
         // along with the app's domain, then `signTypedData` with the account's 712 and account domain.
         // The account domain is added as a layer to prevent replay attacks since some apps do not include the
@@ -274,7 +272,7 @@ contract IthacaAccount is IIthacaAccount, EIP712, GuardedExecutor {
         bytes32 replaySafeDigest = EfficientHashLib.hash(SIGN_TYPEHASH, digest);
         digest = _hashTypedDataOnlyVerifyingContract(replaySafeDigest);
 
-        (bool isValid, bytes32 keyHash) = _unwrapAndValidateSignature(digest, signature);
+        (bool isValid, bytes32 keyHash) = unwrapAndValidateSignature(digest, signature);
         if (LibBit.and(keyHash != 0, isValid)) {
             isValid =
                 _isSuperAdmin(keyHash) || _getKeyExtraStorage(keyHash).checkers.contains(msg.sender);
@@ -498,23 +496,16 @@ contract IthacaAccount is IIthacaAccount, EIP712, GuardedExecutor {
     function unwrapAndValidateSignature(bytes32 digest, bytes calldata signature)
         public
         view
-        returns (bool isValid, bytes32 keyHash)
-    {
-        // If the signature's length is 64 or 65, treat it like an secp256k1 signature.
-        if (LibBit.or(signature.length == 64, signature.length == 65)) {
-            return (ECDSA.recoverCalldata(digest, signature) == address(this), 0);
-        }
-
-        return _unwrapAndValidateSignature(digest, signature);
-    }
-
-    function _unwrapAndValidateSignature(bytes32 digest, bytes calldata signature)
-        internal
-        view
+        virtual
         returns (bool isValid, bytes32 keyHash)
     {
         // Early return if unable to unwrap the signature.
         if (signature.length < 0x21) return (false, 0);
+
+        // If the signature's length is 64 or 65, treat it like an secp256k1 signature.
+        if (LibBit.or(signature.length == 64, signature.length == 65)) {
+            return (ECDSA.recoverCalldata(digest, signature) == address(this), 0);
+        }
 
         unchecked {
             uint256 n = signature.length - 0x21;
@@ -584,9 +575,6 @@ contract IthacaAccount is IIthacaAccount, EIP712, GuardedExecutor {
 
     /// @dev Adds the key. If the key already exist, its expiry will be updated.
     function _addKey(Key memory key) internal virtual returns (bytes32 keyHash) {
-        if (key.isSuperAdmin) {
-            if (!_keyTypeCanBeSuperAdmin(key.keyType)) revert KeyTypeCannotBeSuperAdmin();
-        }
         // `keccak256(abi.encode(key.keyType, keccak256(key.publicKey)))`.
         keyHash = hash(key);
         AccountStorage storage $ = _getAccountStorage();
@@ -594,11 +582,6 @@ contract IthacaAccount is IIthacaAccount, EIP712, GuardedExecutor {
             abi.encodePacked(key.publicKey, key.expiry, key.keyType, key.isSuperAdmin)
         );
         $.keyHashes.add(keyHash);
-    }
-
-    /// @dev Returns if the `keyType` can be a super admin.
-    function _keyTypeCanBeSuperAdmin(KeyType keyType) internal view virtual returns (bool) {
-        return keyType != KeyType.P256;
     }
 
     /// @dev Removes the key corresponding to the `keyHash`. Reverts if the key does not exist.
@@ -656,6 +639,11 @@ contract IthacaAccount is IIthacaAccount, EIP712, GuardedExecutor {
 
         // If this account is the paymaster, validate the paymaster signature.
         if (intent.payer == address(this)) {
+            if (_getAccountStorage().paymasterNonces[intentDigest]) {
+                revert PaymasterNonceError();
+            }
+            _getAccountStorage().paymasterNonces[intentDigest] = true;
+
             (bool isValid, bytes32 k) =
                 unwrapAndValidateSignature(intentDigest, intent.paymentSignature);
 
@@ -767,6 +755,6 @@ contract IthacaAccount is IIthacaAccount, EIP712, GuardedExecutor {
         returns (string memory name, string memory version)
     {
         name = "IthacaAccount";
-        version = "0.5.8";
+        version = "0.5.11";
     }
 }
