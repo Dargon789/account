@@ -275,8 +275,8 @@ contract IthacaAccount is IIthacaAccount, EIP712, GuardedExecutor {
 
         (bool isValid, bytes32 keyHash) = unwrapAndValidateSignature(digest, signature);
         if (LibBit.and(keyHash != 0, isValid)) {
-            isValid =
-                _isSuperAdmin(keyHash) || _getKeyExtraStorage(keyHash).checkers.contains(msg.sender);
+            isValid = _isSuperAdmin(keyHash)
+                || _getKeyExtraStorage(keyHash).checkers.contains(msg.sender);
         }
         // `bytes4(keccak256("isValidSignature(bytes32,bytes)")) = 0x1626ba7e`.
         // We use `0xffffffff` for invalid, in convention with the reference implementation.
@@ -400,12 +400,7 @@ contract IthacaAccount is IIthacaAccount, EIP712, GuardedExecutor {
     }
 
     /// @dev Returns arrays of all (non-expired) authorized keys and their hashes.
-    function getKeys()
-        public
-        view
-        virtual
-        returns (Key[] memory keys, bytes32[] memory keyHashes)
-    {
+    function getKeys() public view virtual returns (Key[] memory keys, bytes32[] memory keyHashes) {
         uint256 totalCount = keyCount();
 
         keys = new Key[](totalCount);
@@ -484,17 +479,17 @@ contract IthacaAccount is IIthacaAccount, EIP712, GuardedExecutor {
                 )
             );
         }
-        bool isMultichain = nonce >> 240 == MULTICHAIN_NONCE_PREFIX;
-        bytes32 structHash = EfficientHashLib.hash(
-            uint256(EXECUTE_TYPEHASH), LibBit.toUint(isMultichain), uint256(a.hash()), nonce
-        );
-        return isMultichain ? _hashTypedDataSansChainId(structHash) : _hashTypedData(structHash);
+        bytes32 structHash =
+            EfficientHashLib.hash(uint256(EXECUTE_TYPEHASH), uint256(a.hash()), nonce);
+        return nonce >> 240 == MULTICHAIN_NONCE_PREFIX
+            ? _hashTypedDataSansChainId(structHash)
+            : _hashTypedData(structHash);
     }
 
     /// @dev Verifies the merkle sig
     /// - Note: Each leaf of the merkle tree should be a standard digest.
     /// - The signature for using merkle verification is encoded as:
-    /// - bytes signature = abi.encode(bytes32[] proof, bytes32 root, bytes rootSig)
+    /// - bytes signature = abi.encodePacked(bytes32[] proof, bytes32 root, bytes rootSig)
     function _verifyMerkleSig(bytes32 digest, bytes calldata signature)
         internal
         view
@@ -527,7 +522,7 @@ contract IthacaAccount is IIthacaAccount, EIP712, GuardedExecutor {
 
     /// @dev Returns if the signature is valid, along with its `keyHash`.
     /// The `signature` is a wrapped signature, given by
-    /// `abi.encode(bytes(innerSignature), bytes32(keyHash), bool(prehash), bool(merkle))`.
+    /// `abi.encodePacked(bytes(innerSignature), bytes32(keyHash), bool(prehash), bool(merkle))`.
     function unwrapAndValidateSignature(bytes32 digest, bytes calldata signature)
         public
         view
@@ -535,7 +530,7 @@ contract IthacaAccount is IIthacaAccount, EIP712, GuardedExecutor {
         returns (bool isValid, bytes32 keyHash)
     {
         // Early return if unable to unwrap the signature.
-        if (signature.length < 0x21) return (false, 0);
+        if (signature.length < 0x22) return (false, 0);
 
         // If the signature's length is 64 or 65, treat it like an secp256k1 signature.
         if (LibBit.or(signature.length == 64, signature.length == 65)) {
@@ -543,6 +538,7 @@ contract IthacaAccount is IIthacaAccount, EIP712, GuardedExecutor {
         }
 
         bool merkle;
+
         unchecked {
             uint256 n = signature.length - 0x22;
             keyHash = LibBytes.loadCalldata(signature, n);
@@ -551,6 +547,7 @@ contract IthacaAccount is IIthacaAccount, EIP712, GuardedExecutor {
             if (uint256(LibBytes.loadCalldata(signature, n + 1)) & 0xff != 0) {
                 digest = EfficientHashLib.sha2(digest); // `sha256(abi.encode(digest))`.
             }
+
             merkle = uint256(LibBytes.loadCalldata(signature, n + 2)) & 0xff != 0;
         }
 
@@ -619,9 +616,8 @@ contract IthacaAccount is IIthacaAccount, EIP712, GuardedExecutor {
         // `keccak256(abi.encode(key.keyType, keccak256(key.publicKey)))`.
         keyHash = hash(key);
         AccountStorage storage $ = _getAccountStorage();
-        $.keyStorage[keyHash].set(
-            abi.encodePacked(key.publicKey, key.expiry, key.keyType, key.isSuperAdmin)
-        );
+        $.keyStorage[keyHash]
+        .set(abi.encodePacked(key.publicKey, key.expiry, key.keyType, key.isSuperAdmin));
         $.keyHashes.add(keyHash);
     }
 
@@ -650,43 +646,26 @@ contract IthacaAccount is IIthacaAccount, EIP712, GuardedExecutor {
         uint256 paymentAmount,
         bytes32 keyHash,
         bytes32 intentDigest,
-        bytes calldata encodedIntent
+        address eoa,
+        address payer,
+        address paymentToken,
+        address paymentRecipient,
+        bytes calldata paymentSignature
     ) public virtual {
-        Intent calldata intent;
-        // Equivalent Solidity Code: (In the assembly intent is stored in calldata, instead of memory)
-        // Intent memory intent = abi.decode(encodedIntent, (Intent));
-        // Gas Savings:
-        // ~2.5-3k gas for general cases, by avoiding duplicated bounds checks, and avoiding writing the intent to memory.
-        // Extracts the Intent from the calldata bytes, with minimal checks.
-        // NOTE: Only use this implementation if you are sure that the encodedIntent is coming from a trusted source.
-        // We can avoid standard bound checks here, because the Orchestrator already does these checks when it interacts with ALL the fields in the intent using solidity.
-        assembly ("memory-safe") {
-            let t := calldataload(encodedIntent.offset)
-            intent := add(t, encodedIntent.offset)
-            // Bounds check. We don't need to explicitly check the fields here.
-            // In the self call functions, we will use regular Solidity to access the
-            // dynamic fields like `signature`, which generate the implicit bounds checks.
-            if or(shr(64, t), lt(encodedIntent.length, 0x20)) { revert(0x00, 0x00) }
-        }
-
-        if (
-            !LibBit.and(
-                msg.sender == ORCHESTRATOR,
-                LibBit.or(intent.eoa == address(this), intent.payer == address(this))
-            )
-        ) {
+        if (!LibBit.and(
+                msg.sender == ORCHESTRATOR, LibBit.or(eoa == address(this), payer == address(this))
+            )) {
             revert Unauthorized();
         }
 
         // If this account is the paymaster, validate the paymaster signature.
-        if (intent.payer == address(this)) {
+        if (payer == address(this)) {
             if (_getAccountStorage().paymasterNonces[intentDigest]) {
                 revert PaymasterNonceError();
             }
             _getAccountStorage().paymasterNonces[intentDigest] = true;
 
-            (bool isValid, bytes32 k) =
-                unwrapAndValidateSignature(intentDigest, intent.paymentSignature);
+            (bool isValid, bytes32 k) = unwrapAndValidateSignature(intentDigest, paymentSignature);
 
             // Set the target key hash to the payer's.
             keyHash = k;
@@ -703,13 +682,13 @@ contract IthacaAccount is IIthacaAccount, EIP712, GuardedExecutor {
             }
         }
 
-        TokenTransferLib.safeTransfer(intent.paymentToken, intent.paymentRecipient, paymentAmount);
+        TokenTransferLib.safeTransfer(paymentToken, paymentRecipient, paymentAmount);
+
         // Increase spend.
         if (!(keyHash == bytes32(0) || _isSuperAdmin(keyHash))) {
             SpendStorage storage spends = _getGuardedExecutorKeyStorage(keyHash).spends;
-            _incrementSpent(spends.spends[intent.paymentToken], intent.paymentToken, paymentAmount);
+            _incrementSpent(spends.spends[paymentToken], paymentToken, paymentAmount);
         }
-
         // Done to avoid compiler warnings.
         intentDigest = intentDigest;
     }
