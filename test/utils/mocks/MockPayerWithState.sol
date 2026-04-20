@@ -54,42 +54,35 @@ contract MockPayerWithState is Ownable {
     }
 
     /// @dev Pays `paymentAmount` of `paymentToken` to the `paymentRecipient`.
-    /// @param paymentAmount The amount to pay
-    /// @param keyHash The hash of the key used to authorize the operation
-    /// @param intentDigest The digest of the user operation
-    /// @param eoa The EOA address
-    /// @param payer The payer address
-    /// @param paymentToken The token to pay with
-    /// @param paymentRecipient The recipient of the payment
-    /// @param paymentSignature The payment signature
+    /// The EOA and token details are extracted from the `encodedIntent`.
+    /// Reverts if the specified Orchestrator (`msg.sender`) is not approved,
+    /// if the EOA lacks sufficient funds, or if the nonce has already been used.
+    /// @param paymentAmount The amount to pay.
+    /// @param keyHash The key hash associated with the operation (not used in this mock's logic but kept for signature compatibility).
+    /// @param digest The digest of the intent (used for nonce tracking).
+    /// @param encodedIntent ABI encoded Intent struct.
     function pay(
         uint256 paymentAmount,
         bytes32 keyHash,
-        bytes32 intentDigest,
-        address eoa,
-        address payer,
-        address paymentToken,
-        address paymentRecipient,
-        bytes calldata paymentSignature
+        bytes32 digest,
+        bytes calldata encodedIntent
     ) public virtual {
         if (!isApprovedOrchestrator[msg.sender]) revert Unauthorized();
 
         // Check and set nonce to prevent replay attacks
-        if (paymasterNonces[intentDigest]) {
+        if (paymasterNonces[digest]) {
             revert PaymasterNonceError();
         }
-        paymasterNonces[intentDigest] = true;
+        paymasterNonces[digest] = true;
+
+        ICommon.Intent memory u = abi.decode(encodedIntent, (ICommon.Intent));
 
         // We shall rely on arithmetic underflow error to revert if there's insufficient funds.
-        funds[paymentToken][eoa] -= paymentAmount;
-        TokenTransferLib.safeTransfer(paymentToken, paymentRecipient, paymentAmount);
+        funds[u.paymentToken][u.eoa] -= paymentAmount;
+        TokenTransferLib.safeTransfer(u.paymentToken, u.paymentRecipient, paymentAmount);
 
         // Emit the event for debugging.
-        emit Compensated(paymentToken, paymentRecipient, paymentAmount, eoa, keyHash);
-
-        // Unused parameters
-        payer;
-        paymentSignature;
+        emit Compensated(u.paymentToken, u.paymentRecipient, paymentAmount, u.eoa, keyHash);
     }
 
     receive() external payable {}

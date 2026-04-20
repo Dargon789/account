@@ -132,12 +132,12 @@ contract Escrow is IEscrow {
         for (uint256 i = 0; i < escrowIds.length; i++) {
             Escrow storage _escrow = escrows[escrowIds[i]];
             // If refund timestamp hasn't passed yet, then the refund is invalid.
-            if (block.timestamp > _escrow.refundTimestamp || msg.sender == _escrow.recipient) {
-                _refundDepositor(escrowIds[i], _escrow);
-                _refundRecipient(escrowIds[i], _escrow);
-            } else {
+            if (block.timestamp <= _escrow.refundTimestamp) {
                 revert RefundInvalid();
             }
+
+            _refundDepositor(escrowIds[i], _escrow);
+            _refundRecipient(escrowIds[i], _escrow);
         }
     }
 
@@ -147,11 +147,10 @@ contract Escrow is IEscrow {
         for (uint256 i = 0; i < escrowIds.length; i++) {
             Escrow storage _escrow = escrows[escrowIds[i]];
             // If refund timestamp hasn't passed yet, then the refund is invalid.
-            if (block.timestamp > _escrow.refundTimestamp || msg.sender == _escrow.depositor) {
-                _refundDepositor(escrowIds[i], _escrow);
-            } else {
+            if (block.timestamp <= _escrow.refundTimestamp) {
                 revert RefundInvalid();
             }
+            _refundDepositor(escrowIds[i], _escrow);
         }
     }
 
@@ -182,11 +181,11 @@ contract Escrow is IEscrow {
             Escrow storage _escrow = escrows[escrowIds[i]];
 
             // If settlement is still within the deadline, then refund is invalid.
-            if (block.timestamp > _escrow.refundTimestamp || msg.sender == _escrow.recipient) {
-                _refundRecipient(escrowIds[i], _escrow);
-            } else {
+            if (block.timestamp <= _escrow.refundTimestamp) {
                 revert RefundInvalid();
             }
+
+            _refundRecipient(escrowIds[i], _escrow);
         }
     }
 
