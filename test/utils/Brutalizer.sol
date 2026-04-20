@@ -825,9 +825,7 @@ contract Brutalizer {
             let remainder := and(length, 0x1f)
             if remainder { if shl(mul(8, remainder), lastWord) { notZeroRightPadded := 1 } }
             // Check if the memory allocated is sufficient.
-            if length {
-                if gt(add(add(s, 0x20), length), mload(0x40)) { insufficientMalloc := 1 }
-            }
+            if length { if gt(add(add(s, 0x20), length), mload(0x40)) { insufficientMalloc := 1 } }
         }
         if (notZeroRightPadded) revert("Not zero right padded!");
         if (insufficientMalloc) revert("Insufficient memory allocation!");

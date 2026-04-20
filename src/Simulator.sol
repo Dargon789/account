@@ -4,12 +4,10 @@ pragma solidity ^0.8.23;
 import {ICommon} from "./interfaces/ICommon.sol";
 import {IMulticall3} from "./interfaces/IMulticall3.sol";
 import {FixedPointMathLib as Math} from "solady/utils/FixedPointMathLib.sol";
-import {MockOrchestrator} from "../test/utils/mocks/MockOrchestrator.sol";
-import {IntentHelpers} from "./libraries/IntentHelpers.sol";
 
 /// @title Simulator
 /// @notice A separate contract for calling the Orchestrator contract solely for gas simulation.
-contract Simulator is IntentHelpers {
+contract Simulator {
     ////////////////////////////////////////////////////////////////////////
     // EIP-5267 Support
     ////////////////////////////////////////////////////////////////////////
@@ -56,23 +54,15 @@ contract Simulator is IntentHelpers {
 
     /// @dev Updates the payment amounts for the Intent passed in.
     function _updatePaymentAmounts(
-        bytes memory u,
+        ICommon.Intent memory u,
         uint256 gas,
         uint8 paymentPerGasPrecision,
         uint256 paymentPerGas
     ) internal pure {
         uint256 paymentAmount = Math.fullMulDiv(gas, paymentPerGas, 10 ** paymentPerGasPrecision);
 
-        // 36 because we don't have the calldata offset, or the function selector
-        uint256 paymentOffset = _PAYMENT_AMOUNT_OFFSET - 36;
-        uint256 paymentMaxOffset = _PAYMENT_MAX_AMOUNT_OFFSET - 36;
-        assembly ("memory-safe") {
-            let currentPaymentAmount := mload(add(u, paymentOffset))
-            mstore(add(u, paymentOffset), add(currentPaymentAmount, paymentAmount))
-
-            let currentPaymentMaxAmount := mload(add(u, paymentMaxOffset))
-            mstore(add(u, paymentMaxOffset), add(currentPaymentMaxAmount, paymentAmount))
-        }
+        u.paymentAmount += paymentAmount;
+        u.paymentMaxAmount += paymentAmount;
     }
 
     /// @dev Performs a call to the Orchestrator, and returns the gas used by the Intent.
@@ -111,8 +101,10 @@ contract Simulator is IntentHelpers {
         bytes calldata encodedIntent
     ) internal freeTempMemory returns (uint256) {
         bytes memory data = abi.encodeWithSignature(
-            "simulateExecute(bytes)",
-            abi.encodePacked(encodedIntent, isStateOverride, combinedGasOverride)
+            "simulateExecute(bool,uint256,bytes)",
+            isStateOverride,
+            combinedGasOverride,
+            encodedIntent
         );
         return _callOrchestrator(oc, isStateOverride, data);
     }
@@ -123,10 +115,13 @@ contract Simulator is IntentHelpers {
         address oc,
         bool isStateOverride,
         uint256 combinedGasOverride,
-        bytes memory u
+        ICommon.Intent memory u
     ) internal freeTempMemory returns (uint256) {
         bytes memory data = abi.encodeWithSignature(
-            "simulateExecute(bytes)", abi.encodePacked(u, isStateOverride, combinedGasOverride)
+            "simulateExecute(bool,uint256,bytes)",
+            isStateOverride,
+            combinedGasOverride,
+            abi.encode(u)
         );
         return _callOrchestrator(oc, isStateOverride, data);
     }
@@ -262,7 +257,7 @@ contract Simulator is IntentHelpers {
     /// @dev The closer this number is to 10_000, the more precise combined gas will be. But more iterations will be needed.
     /// @dev This number should always be > 10_000, to get correct results.
     //// If the increment is too small, the function might run out of gas while finding the combined gas value.
-    /// @param calldataIntent The encoded intent
+    /// @param encodedIntent The encoded user operation
     /// @return gasUsed The gas used in the successful simulation
     /// @return combinedGas The first combined gas value that gives a successful simulation.
     /// This function reverts if the primary simulation run with max combinedGas fails.
@@ -273,10 +268,10 @@ contract Simulator is IntentHelpers {
         uint8 paymentPerGasPrecision,
         uint256 paymentPerGas,
         uint256 combinedGasIncrement,
-        bytes calldata calldataIntent
+        bytes calldata encodedIntent
     ) public payable virtual returns (uint256 gasUsed, uint256 combinedGas) {
         // 1. Primary Simulation Run to get initial gasUsed value with combinedGasOverride
-        gasUsed = _callOrchestratorCalldata(oc, false, type(uint256).max, calldataIntent);
+        gasUsed = _callOrchestratorCalldata(oc, false, type(uint256).max, encodedIntent);
 
         // If the simulation failed, bubble up the full revert.
         assembly ("memory-safe") {
@@ -287,21 +282,15 @@ contract Simulator is IntentHelpers {
             }
         }
 
-        bytes memory memoryIntent = calldataIntent;
+        // Update payment amounts using the gasUsed value
+        ICommon.Intent memory u = abi.decode(encodedIntent, (ICommon.Intent));
 
-        // 36 because we don't have the calldata offset, or the function selector
-        uint256 offset = _COMBINED_GAS_OFFSET - 36;
-        assembly ("memory-safe") {
-            let currentCombinedGas := mload(add(memoryIntent, offset))
-            let newCombinedGas := add(currentCombinedGas, gasUsed)
-            mstore(add(memoryIntent, offset), newCombinedGas)
-            combinedGas := newCombinedGas
-        }
+        u.combinedGas += gasUsed;
 
-        _updatePaymentAmounts(memoryIntent, combinedGas, paymentPerGasPrecision, paymentPerGas);
+        _updatePaymentAmounts(u, u.combinedGas, paymentPerGasPrecision, paymentPerGas);
 
         while (true) {
-            gasUsed = _callOrchestratorMemory(oc, false, 0, memoryIntent);
+            gasUsed = _callOrchestratorMemory(oc, false, 0, u);
 
             // If the simulation failed, bubble up the full revert.
             assembly ("memory-safe") {
@@ -316,34 +305,22 @@ contract Simulator is IntentHelpers {
             }
 
             if (gasUsed != 0) {
-                // Get current combinedGas from bytes
-                assembly ("memory-safe") {
-                    combinedGas := mload(add(memoryIntent, offset))
-                }
-                return (gasUsed, combinedGas);
+                return (gasUsed, u.combinedGas);
             }
 
-            // Get current combinedGas and calculate increment
-            assembly ("memory-safe") {
-                combinedGas := mload(add(memoryIntent, offset))
-            }
-            uint256 gasIncrement = Math.mulDiv(combinedGas, combinedGasIncrement, 10_000);
+            uint256 gasIncrement = Math.mulDiv(u.combinedGas, combinedGasIncrement, 10_000);
 
-            _updatePaymentAmounts(memoryIntent, gasIncrement, paymentPerGasPrecision, paymentPerGas);
+            _updatePaymentAmounts(u, gasIncrement, paymentPerGasPrecision, paymentPerGas);
 
-            // Update combinedGas with increment using assembly
-            assembly ("memory-safe") {
-                let currentCombinedGas := mload(add(memoryIntent, offset))
-                let newCombinedGas := add(currentCombinedGas, gasIncrement)
-                mstore(add(memoryIntent, offset), newCombinedGas)
-            }
+            // Step up the combined gas, until we see a simulation passing
+            u.combinedGas += gasIncrement;
         }
     }
 
     /// @dev Same as simulateCombinedGas, but with an additional verification run
     /// that generates a successful non reverting state override simulation.
     /// Which can be used in eth_simulateV1 to get the trace.\
-    /// @param combinedGasVerificationOffset is a static value that is added after a successful combinedGas is found.
+    /// @param combinedGasVerificationOffset is a static value that is added after a succesful combinedGas is found.
     /// This can be used to account for variations in sig verification gas, for keytypes like P256.
     /// @param paymentPerGasPrecision The precision of the payment per gas value.
     /// paymentAmount = gas * paymentPerGas / (10 ** paymentPerGasPrecision)
@@ -361,18 +338,15 @@ contract Simulator is IntentHelpers {
 
         combinedGas += combinedGasVerificationOffset;
 
-        bytes memory encodedIntentCopy = encodedIntent;
+        ICommon.Intent memory u = abi.decode(encodedIntent, (ICommon.Intent));
 
-        _updatePaymentAmounts(encodedIntentCopy, combinedGas, paymentPerGasPrecision, paymentPerGas);
+        _updatePaymentAmounts(u, combinedGas, paymentPerGasPrecision, paymentPerGas);
 
-        // 36 because we don't have the calldata offset, or the function selector
-        uint256 offset = _COMBINED_GAS_OFFSET - 36;
-        assembly ("memory-safe") {
-            mstore(add(encodedIntentCopy, offset), combinedGas)
-        }
+        u.combinedGas = combinedGas;
 
         // Verification Run to generate the logs with the correct combinedGas and payment amounts.
-        gasUsed = _callOrchestratorMemory(oc, true, 0, encodedIntentCopy);
+        gasUsed = _callOrchestratorMemory(oc, true, 0, u);
+
         // If the simulation failed, bubble up full revert
         assembly ("memory-safe") {
             if iszero(gasUsed) {
