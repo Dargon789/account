@@ -462,6 +462,10 @@ contract AccountTest is BaseTest {
         vm.prank(address(d.d));
         d.d.execute(_ERC7821_BATCH_EXECUTION_MODE, executionData);
 
-        assertEq(contextKeyHash, bytes32(0), "Context key hash should be zero for self-execution without opData");
+        assertEq(
+            contextKeyHash,
+            bytes32(0),
+            "Context key hash should be zero for self-execution without opData"
+        );
     }
 }
