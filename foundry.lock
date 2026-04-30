@@ -2,11 +2,11 @@
   "lib/LayerZero-v2": {
     "rev": "88428755be6caa71cb1d2926141d73c8989296b5"
   },
-  "lib/devtools": {
-    "rev": "01c1eaeb123e4364fbe96cdddf875640edf2566c"
-  },
   "lib/forge-std": {
-    "rev": "a3dca253700f19f15b1837c57c67b9388f5cc3fb"
+    "branch": {
+      "name": "master",
+      "rev": "27ab851c7cde58b22cc4de426d59e23a31c5cb9c"
+    }
   },
   "lib/murky": {
     "rev": "5feccd1253d7da820f7cccccdedf64471025455d"
@@ -17,7 +17,7 @@
   "lib/solady": {
     "branch": {
       "name": "main",
-      "rev": "834bbc4fd366ca8bce8c532a0e3b34eca6be709c"
+      "rev": "73f13dd1483707ef6b4d16cb0543570b7e1715a8"
     }
   }
 }
